@@ -2,12 +2,15 @@ import fs from 'fs';
 
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import ScriptVarType from '#/cache/config/ScriptVarType.js';
 import Packet from '#/io/Packet.js';
 
 export default class EnumType extends ConfigType {
     static configNames = new Map<string, number>();
     static configs: EnumType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/enum.dat`)) {
@@ -15,7 +18,21 @@ export default class EnumType extends ConfigType {
         }
 
         const dat = Packet.load(`${dir}/server/enum.dat`);
-        this.parse(dat);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/enum.idx`, dat, null, null, null);
+        if (index) {
+            EnumType.index = index;
+            EnumType.configNames = index.server.names();
+            EnumType.configs = new Array(index.server.count);
+        } else {
+            EnumType.index = null;
+            this.parse(dat);
+        }
+    }
+
+    static decodeOne(id: number): EnumType {
+        const config = new EnumType(id);
+        config.decodeType(EnumType.index!.server.entry(id));
+        return config;
     }
 
     static parse(dat: Packet) {
@@ -37,7 +54,12 @@ export default class EnumType extends ConfigType {
     }
 
     static get(id: number): EnumType {
-        return EnumType.configs[id];
+        let config: EnumType | undefined = EnumType.configs[id];
+        if (config === undefined && EnumType.index !== null && id >= 0 && id < EnumType.index.server.count) {
+            config = EnumType.decodeOne(id);
+            EnumType.configs[id] = config;
+        }
+        return config as EnumType;
     }
 
     static getId(name: string): number {

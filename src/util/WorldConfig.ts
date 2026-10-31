@@ -292,6 +292,12 @@ export function getDatabaseUrl(config: WorldConfig): string {
 export function loadWorldConfig(): WorldConfig {
     const defaults = createDefaultWorldConfig();
 
+    // embedded host passes settings as legacy env vars
+    const hostEnv = typeof process !== 'undefined' && process.env ? process.env : {};
+    if (hostEnv.BUILD_SRC_DIR !== undefined || hostEnv.NODE_XPRATE !== undefined) {
+        return migrateFromLegacyEnv(defaults, hostEnv as Record<string, string>);
+    }
+
     if (fs.existsSync(worldConfigPath)) {
         try {
             const raw = fs.readFileSync(worldConfigPath, 'utf8');

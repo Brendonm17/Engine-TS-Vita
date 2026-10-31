@@ -35,3 +35,9 @@ Thumbs.db
 ### macOS ###
 .DS_Store
 ._*
+
+# single-player build output
+sp/server.bundle.js
+sp/*.bc
+sp/serverdata*.zip
+data/cache/

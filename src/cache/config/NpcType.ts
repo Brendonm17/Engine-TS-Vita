@@ -1,6 +1,7 @@
 import fs from 'fs';
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import { ParamHelper, ParamMap } from '#/cache/config/ParamHelper.js';
 import { BlockWalk } from '#/engine/entity/BlockWalk.js';
 import { MoveRestrict } from '#/engine/entity/MoveRestrict.js';
@@ -14,6 +15,8 @@ import kleur from 'kleur';
 export default class NpcType extends ConfigType {
     static configNames = new Map();
     static configs: NpcType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/npc.dat`)) {
@@ -21,7 +24,26 @@ export default class NpcType extends ConfigType {
         }
         const server = Packet.load(`${dir}/server/npc.dat`);
         const jag = Jagfile.load(`${dir}/client/config`);
-        this.parse(server, jag);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/npc.idx`, server, jag, 'npc.dat', 'npc.idx');
+        if (index) {
+            NpcType.index = index;
+            NpcType.configNames = index.server.names();
+            NpcType.configs = new Array(index.server.count);
+        } else {
+            NpcType.index = null;
+            this.parse(server, jag);
+        }
+    }
+
+    static decodeOne(id: number): NpcType {
+        const index: ConfigPair = NpcType.index!;
+        const config = new NpcType(id);
+        config.decodeType(index.server.entry(id));
+        if (index.client) {
+            config.decodeType(index.client.entry(id));
+        }
+        config.postDecode();
+        return config;
     }
 
     static parse(server: Packet, jag: Jagfile) {
@@ -48,7 +70,12 @@ export default class NpcType extends ConfigType {
     }
 
     static get(id: number): NpcType {
-        return NpcType.configs[id];
+        let config: NpcType | undefined = NpcType.configs[id];
+        if (config === undefined && NpcType.index !== null && id >= 0 && id < NpcType.index.server.count) {
+            config = NpcType.decodeOne(id);
+            NpcType.configs[id] = config;
+        }
+        return config as NpcType;
     }
 
     static getId(name: string): number {

@@ -1776,6 +1776,26 @@ export default class Player extends PathingEntity {
             if (varp.transmit) {
                 this.writeVarp(id, value);
             }
+
+            if (varp.id === Player.skipTutorialVarp && value === Player.SKIP_TUTORIAL_AFTER) {
+                this.spSkipTutorial();
+            }
+        }
+    }
+
+    // SP_SKIP_TUTORIAL: queue tutorial_complete once the character is designed
+    private static readonly SKIP_TUTORIAL_AFTER: number = 1; // ^newbie_basics_instructor_designed_character
+    private static skipTutorialVarp: number = -1;
+
+    static initSkipTutorial(): void {
+        const env = typeof process !== 'undefined' && process.env ? process.env : {};
+        Player.skipTutorialVarp = env.SP_SKIP_TUTORIAL === 'true' ? VarPlayerType.getId('tutorial') : -1;
+    }
+
+    private spSkipTutorial(): void {
+        const script: ScriptFile | undefined = ScriptProvider.getByName('[label,tutorial_complete]');
+        if (script) {
+            this.enqueueScript(script, PlayerQueueType.ENGINE);
         }
     }
 

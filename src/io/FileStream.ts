@@ -62,6 +62,26 @@ export default class FileStream {
         return true;
     }
 
+    // FNV-1a hash of an archive index
+    indexChecksum(index: number): number {
+        const idx = this.idx[index];
+        if (!idx) {
+            return 0;
+        }
+
+        // shared handle, restore pos
+        const pos = idx.pos;
+        idx.pos = 0;
+        const bytes = idx.gdata(idx.length);
+        idx.pos = pos;
+
+        let hash = 2166136261;
+        for (let i = 0; i < bytes.length; i++) {
+            hash = (Math.imul(hash ^ bytes[i], 16777619) | 0) >>> 0;
+        }
+        return hash;
+    }
+
     count(index: number): number {
         if (index < 0 || index > this.idx.length || !this.idx[index]) {
             return 0;

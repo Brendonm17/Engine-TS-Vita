@@ -27,6 +27,11 @@ export default class Loc extends NonPathingEntity {
         return this.currentInfo !== this.baseInfo;
     }
 
+    // type from the map, ignoring loc_change
+    get baseType(): number {
+        return this.baseInfo & 0x3fff;
+    }
+
     get type(): number {
         return this.currentInfo & 0x3fff;
     }

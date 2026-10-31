@@ -1,3 +1,4 @@
+import LocType from '#/cache/config/LocType.js';
 import ObjType from '#/cache/config/ObjType.js';
 import { CoordGrid } from '#/engine/CoordGrid.js';
 import { EntityLifeCycle } from '#/engine/entity/EntityLifeCycle.js';
@@ -31,6 +32,7 @@ import Environment from '#/util/Environment.js';
 import LinkList from '#/datastruct/LinkList.js';
 import ServerGameProtRepository from '#/network/game/server/ServerGameProtRepository.js';
 import DoublyLinkList from '#/datastruct/DoublyLinkList.js';
+import type { HibernatedLoc, HibernatedObj } from '#/engine/MapDelta.js';
 
 export default class Zone {
     private static readonly SIZE: number = 8 * 8;
@@ -52,6 +54,9 @@ export default class Zone {
     private locsCount: number = 0;
     private objsCount: number = 0;
     private readonly entityEvents: Map<NonPathingEntity, ZoneEvent[]>;
+
+    // packed static locs from the native loader, created on first use
+    private pendingStatics: Int32Array | null = null;
 
     // zone events
     private readonly events: Set<ZoneEvent>;
@@ -226,6 +231,88 @@ export default class Zone {
 
     // ---- static locs/objs are added during world init ----
 
+    // append state that differs from disk, false if it can't be captured
+    hibernate(locs: HibernatedLoc[], objs: HibernatedObj[]): boolean {
+        if (this.playersCount > 0 || this.events.size > 0 || this.entityEvents.size > 0) {
+            return false;
+        }
+        for (const loc of this.locs.all()) {
+            const remaining: number = loc.eventTracker !== null ? loc.lifecycleTick : -1;
+            if (loc.lifecycle === EntityLifeCycle.RESPAWN) {
+                if (loc.isActive && !loc.isChanged()) {
+                    continue;
+                }
+                locs.push({ x: loc.x, z: loc.z, level: loc.level, base: loc.baseType, dynamic: false, active: loc.isActive, type: loc.type, shape: loc.shape, angle: loc.angle, remaining });
+            } else if (loc.isActive) {
+                locs.push({ x: loc.x, z: loc.z, level: loc.level, base: loc.baseType, dynamic: true, active: true, type: loc.type, shape: loc.shape, angle: loc.angle, remaining });
+            }
+        }
+        for (const obj of this.objs.all()) {
+            const remaining: number = obj.eventTracker !== null ? obj.lifecycleTick : -1;
+            if (obj.lifecycle === EntityLifeCycle.RESPAWN) {
+                if (obj.lastChange !== -1) {
+                    return false;
+                }
+                if (obj.isActive) {
+                    continue;
+                }
+                objs.push({ x: obj.x, z: obj.z, level: obj.level, dynamic: false, type: obj.type, count: obj.count, receiver64: Obj.NO_RECEIVER, reveal: -1, remaining });
+            } else if (obj.isActive) {
+                objs.push({ x: obj.x, z: obj.z, level: obj.level, dynamic: true, type: obj.type, count: obj.count, receiver64: obj.receiver64, reveal: obj.reveal, remaining });
+            }
+        }
+        return true;
+    }
+
+    // anything here differs from the on-disk state
+    hasDynamicState(): boolean {
+        if (this.playersCount > 0 || this.events.size > 0 || this.entityEvents.size > 0) {
+            return true;
+        }
+        for (const loc of this.locs.all()) {
+            if (loc.lifecycle !== EntityLifeCycle.RESPAWN || !loc.isActive || loc.isChanged() || loc.eventTracker !== null) {
+                return true;
+            }
+        }
+        for (const obj of this.objs.all()) {
+            if (obj.lifecycle !== EntityLifeCycle.RESPAWN || !obj.isActive || obj.eventTracker !== null || obj.lastChange !== -1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // pairs of [x | z << 3 | shape << 6 | angle << 11, loc id]
+    addStaticLocsPacked(packed: Int32Array): void {
+        if (this.pendingStatics === null) {
+            this.pendingStatics = packed;
+        } else {
+            const merged: Int32Array = new Int32Array(this.pendingStatics.length + packed.length);
+            merged.set(this.pendingStatics, 0);
+            merged.set(packed, this.pendingStatics.length);
+            this.pendingStatics = merged;
+        }
+        this.locsCount += packed.length >> 1;
+    }
+
+    private materialiseStatics(): void {
+        const packed: Int32Array | null = this.pendingStatics;
+        if (packed === null) {
+            return;
+        }
+        this.pendingStatics = null;
+        const x0: number = this.x << 3;
+        const z0: number = this.z << 3;
+        for (let index: number = 0; index < packed.length; index += 2) {
+            const info: number = packed[index];
+            const id: number = packed[index + 1];
+            const type: LocType = LocType.get(id);
+            const loc: Loc = new Loc(this.level, x0 + (info & 0x7), z0 + ((info >> 3) & 0x7), type.width, type.length, EntityLifeCycle.RESPAWN, id, (info >> 6) & 0x1f, (info >> 11) & 0x3);
+            this.locs.addTail(loc); // already counted
+            loc.isActive = true;
+        }
+    }
+
     addStaticLoc(loc: Loc): void {
         this.locs.addTail(loc);
         this.locsCount++;
@@ -241,6 +328,7 @@ export default class Zone {
     // ---- locs ----
 
     addLoc(loc: Loc): void {
+        this.materialiseStatics();
         const coord: number = CoordGrid.packZoneCoord(loc.x, loc.z);
         if (loc.lifecycle === EntityLifeCycle.DESPAWN) {
             this.locs.addTail(loc);
@@ -252,6 +340,7 @@ export default class Zone {
     }
 
     changeLoc(loc: Loc) {
+        this.materialiseStatics();
         // If a loc is inactive, it should be set to active when we call a change
         loc.isActive = true;
 
@@ -264,6 +353,7 @@ export default class Zone {
     }
 
     removeLoc(loc: Loc): void {
+        this.materialiseStatics();
         const coord: number = CoordGrid.packZoneCoord(loc.x, loc.z);
         loc.unlink();
 
@@ -281,6 +371,7 @@ export default class Zone {
     }
 
     getLoc(x: number, z: number, type: number): Loc | null {
+        this.materialiseStatics();
         for (const loc of this.getLocsSafe(CoordGrid.packZoneCoord(x, z))) {
             if (loc.type === type) {
                 return loc;
@@ -481,6 +572,7 @@ export default class Zone {
      * "visible" meaning they are active on the server and available to the client.
      */
     *getAllLocsSafe(reverse: boolean = false): IterableIterator<Loc> {
+        this.materialiseStatics();
         for (const loc of this.locs.all(reverse)) {
             if (loc.isValid()) {
                 yield loc;
@@ -493,6 +585,7 @@ export default class Zone {
      * "visible" meaning they are active on the server and available to the client.
      */
     *getLocsSafe(coord: number): IterableIterator<Loc> {
+        this.materialiseStatics();
         for (const loc of this.locs.all()) {
             if (loc.isValid() && CoordGrid.packZoneCoord(loc.x, loc.z) === coord) {
                 yield loc;
@@ -506,6 +599,7 @@ export default class Zone {
      * "visible" meaning they are active on the server and available to the client.
      */
     *getLocsUnsafe(coord: number): IterableIterator<Loc> {
+        this.materialiseStatics();
         for (const loc of this.locs.all()) {
             if (CoordGrid.packZoneCoord(loc.x, loc.z) === coord) {
                 yield loc;
@@ -519,6 +613,7 @@ export default class Zone {
      * "visible" meaning they are active on the server and available to the client.
      */
     *getAllLocsUnsafe(reverse: boolean = false): IterableIterator<Loc> {
+        this.materialiseStatics();
         for (const loc of this.locs.all(reverse)) {
             yield loc;
         }

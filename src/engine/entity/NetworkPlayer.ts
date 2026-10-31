@@ -98,6 +98,7 @@ export class NetworkPlayer extends Player {
 
             const packetType = ClientGameProt.byId[this.client.opcode];
             if (!packetType) {
+                printError(`client ${this.username} sent unknown opcode ${this.client.opcode}; closing`);
                 this.client.opcode = -1;
                 this.client.close();
                 return false;
@@ -117,6 +118,7 @@ export class NetworkPlayer extends Player {
 
             this.client.waiting = NetworkPlayer.inBuf.g2();
             if (this.client.waiting > 1600) {
+                printError(`client ${this.username} opcode ${this.client.opcode} claims ${this.client.waiting} bytes; closing`);
                 this.client.close();
                 return false;
             }
