@@ -1,6 +1,7 @@
 import fs from 'fs';
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
 import AnimFrame from '#/cache/graphics/AnimFrame.js';
@@ -8,20 +9,41 @@ import AnimFrame from '#/cache/graphics/AnimFrame.js';
 export default class SeqType extends ConfigType {
     private static configNames = new Map<string, number>();
     private static configs: SeqType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/seq.dat`)) {
             return;
         }
 
-        // adds some startup time but we need it for seqlength
-        if (!AnimFrame.instances.length) {
-            AnimFrame.load();
+        // seqlength only needs frame delays
+        if (!AnimFrame.delays.length) {
+            AnimFrame.loadDelays();
         }
 
         const server = Packet.load(`${dir}/server/seq.dat`);
         const jag = Jagfile.load(`${dir}/client/config`);
-        this.parse(server, jag);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/seq.idx`, server, jag, 'seq.dat', 'seq.idx');
+        if (index) {
+            SeqType.index = index;
+            SeqType.configNames = index.server.names();
+            SeqType.configs = new Array(index.server.count);
+        } else {
+            SeqType.index = null;
+            this.parse(server, jag);
+        }
+    }
+
+    static decodeOne(id: number): SeqType {
+        const index: ConfigPair = SeqType.index!;
+        const config = new SeqType(id);
+        config.decodeType(index.server.entry(id));
+        if (index.client) {
+            config.decodeType(index.client.entry(id));
+        }
+        config.postDecode();
+        return config;
     }
 
     static parse(server: Packet, jag: Jagfile) {
@@ -48,7 +70,12 @@ export default class SeqType extends ConfigType {
     }
 
     static get(id: number): SeqType {
-        return SeqType.configs[id];
+        let config: SeqType | undefined = SeqType.configs[id];
+        if (config === undefined && SeqType.index !== null && id >= 0 && id < SeqType.index.server.count) {
+            config = SeqType.decodeOne(id);
+            SeqType.configs[id] = config;
+        }
+        return config as SeqType;
     }
 
     static getId(name: string): number {
@@ -105,7 +132,7 @@ export default class SeqType extends ConfigType {
 
                 this.delay[i] = dat.g2();
                 if (this.delay[i] === 0) {
-                    this.delay[i] = AnimFrame.instances[this.frames[i]]?.delay ?? 0;
+                    this.delay[i] = AnimFrame.getDelay(this.frames[i]);
                 }
 
                 if (this.delay[i] === 0) {

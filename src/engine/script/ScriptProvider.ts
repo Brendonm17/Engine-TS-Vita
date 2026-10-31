@@ -12,19 +12,24 @@ export default class ScriptProvider {
     public static readonly COMPILER_VERSION = 27;
 
     /**
-     * Array of loaded scripts.
+     * Loaded scripts, by id. Decoded on first access.
      */
-    private static scripts: ScriptFile[] = [];
+    private static scripts: (ScriptFile | undefined)[] = [];
 
     /**
-     * Mapping of unique trigger + type/category/global key to script.
+     * Mapping of unique trigger + type/category/global key to script id.
      */
-    private static scriptLookup = new Map<number, ScriptFile>();
+    private static scriptLookup = new Map<number, number>();
 
     /**
      * Mapping of script names to its id.
      */
     private static scriptNames = new Map<string, number>();
+
+    // script.dat and each script's offset and size
+    private static dat: Uint8Array = new Uint8Array(0);
+    private static offsets: Int32Array = new Int32Array(0);
+    private static sizes: Int32Array = new Int32Array(0);
 
     /**
      * Loads all scripts from `dir`.
@@ -51,10 +56,13 @@ export default class ScriptProvider {
             printFatalError('\nFatal: Scripts were compiled with an incompatible script compiler. Please run `npm install`, then `npm run build`, and restart the server.');
         }
 
-        const scripts = new Array<ScriptFile>(entries);
+        const data: Uint8Array = dat.data;
+        const offsets = new Int32Array(entries);
+        const sizes = new Int32Array(entries);
         const scriptNames = new Map<string, number>();
-        const scriptLookup = new Map<number, ScriptFile>();
+        const scriptLookup = new Map<number, number>();
 
+        let pos: number = dat.pos;
         let loaded = 0;
         for (let id = 0; id < entries; id++) {
             const size = idx.g4s();
@@ -62,27 +70,33 @@ export default class ScriptProvider {
                 continue;
             }
 
-            try {
-                const data: Uint8Array = new Uint8Array(size);
-                dat.gdata(data, 0, data.length);
-                const script = ScriptFile.decode(id, new Packet(data));
-                scripts[id] = script;
-                scriptNames.set(script.name, id);
-
-                // add the script to lookup table if the value isn't -1
-                if (script.info.lookupKey !== 0xffffffff) {
-                    scriptLookup.set(script.info.lookupKey, script);
-                }
-
-                loaded++;
-            } catch (err) {
-                console.error(err);
+            // read only the name and lookup key
+            const nameEnd = data.indexOf(0, pos);
+            const pathEnd = nameEnd === -1 ? -1 : data.indexOf(0, nameEnd + 1);
+            if (nameEnd === -1 || pathEnd === -1 || pathEnd + 5 > pos + size) {
                 printWarning(`Warning: Failed to load script ${id}, something may have been partially written`);
                 return -1;
             }
+            const name: string = String.fromCharCode.apply(null, data.subarray(pos, nameEnd) as unknown as number[]);
+            const k = pathEnd + 1;
+            const lookupKey = (data[k] << 24) | (data[k + 1] << 16) | (data[k + 2] << 8) | data[k + 3];
+
+            offsets[id] = pos;
+            sizes[id] = size;
+            scriptNames.set(name, id);
+            // add the script to lookup table if the value isn't -1
+            if (lookupKey !== -1) {
+                scriptLookup.set(lookupKey, id);
+            }
+
+            pos += size;
+            loaded++;
         }
 
-        ScriptProvider.scripts = scripts;
+        ScriptProvider.dat = data;
+        ScriptProvider.offsets = offsets;
+        ScriptProvider.sizes = sizes;
+        ScriptProvider.scripts = new Array<ScriptFile | undefined>(entries);
         ScriptProvider.scriptNames = scriptNames;
         ScriptProvider.scriptLookup = scriptLookup;
         return loaded;
@@ -94,7 +108,20 @@ export default class ScriptProvider {
      * @returns The script.
      */
     static get(id: number): ScriptFile | undefined {
-        return this.scripts[id];
+        const scripts = ScriptProvider.scripts;
+        let script = scripts[id];
+        if (script === undefined && id >= 0 && id < ScriptProvider.sizes.length && ScriptProvider.sizes[id] > 0) {
+            const offset = ScriptProvider.offsets[id];
+            try {
+                script = ScriptFile.decode(id, new Packet(ScriptProvider.dat.subarray(offset, offset + ScriptProvider.sizes[id])));
+            } catch (err) {
+                console.error(err);
+                printWarning(`Warning: Failed to load script ${id}, something may have been partially written`);
+                return undefined;
+            }
+            scripts[id] = script;
+        }
+        return script;
     }
 
     /**
@@ -107,7 +134,15 @@ export default class ScriptProvider {
         if (id === undefined) {
             return undefined;
         }
-        return ScriptProvider.scripts[id];
+        return ScriptProvider.get(id);
+    }
+
+    private static getByKey(key: number): ScriptFile | undefined {
+        const id = ScriptProvider.scriptLookup.get(key);
+        if (id === undefined) {
+            return undefined;
+        }
+        return ScriptProvider.get(id);
     }
 
     /**
@@ -122,15 +157,15 @@ export default class ScriptProvider {
      * @param category The script subject category id.
      */
     static getByTrigger(trigger: TargetOp, type: number = -1, category: number = -1): ScriptFile | undefined {
-        let script = ScriptProvider.scriptLookup.get(trigger | (0x2 << 8) | (type << 10));
+        let script = ScriptProvider.getByKey(trigger | (0x2 << 8) | (type << 10));
         if (script) {
             return script;
         }
-        script = ScriptProvider.scriptLookup.get(trigger | (0x1 << 8) | (category << 10));
+        script = ScriptProvider.getByKey(trigger | (0x1 << 8) | (category << 10));
         if (script) {
             return script;
         }
-        return ScriptProvider.scriptLookup.get(trigger);
+        return ScriptProvider.getByKey(trigger);
     }
 
     /**
@@ -146,10 +181,10 @@ export default class ScriptProvider {
      */
     static getByTriggerSpecific(trigger: ServerTriggerType, type: number = -1, category: number = -1): ScriptFile | undefined {
         if (type !== -1) {
-            return ScriptProvider.scriptLookup.get(trigger | (0x2 << 8) | (type << 10));
+            return ScriptProvider.getByKey(trigger | (0x2 << 8) | (type << 10));
         } else if (category !== -1) {
-            return ScriptProvider.scriptLookup.get(trigger | (0x1 << 8) | (category << 10));
+            return ScriptProvider.getByKey(trigger | (0x1 << 8) | (category << 10));
         }
-        return ScriptProvider.scriptLookup.get(trigger);
+        return ScriptProvider.getByKey(trigger);
     }
 }

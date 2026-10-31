@@ -122,7 +122,8 @@ class World {
 
     private static readonly INV_STOCKRATE: number = 100; // 1m shop restocks
 
-    private static readonly PLAYER_SAVERATE: number = 1500; // 15m autosave
+    // 15m autosave, SP_SAVE_RATE (ticks) overrides
+    private static readonly PLAYER_SAVERATE: number = Math.max(10, parseInt((typeof process !== 'undefined' && process.env ? process.env.SP_SAVE_RATE : undefined) ?? '1500', 10) || 1500);
     private static readonly PLAYER_COORDLOGRATE: number = 50; // 30s server check-in
 
     private static readonly AFK_EVENTRATE: number = 500; // 5m: 60/5 = 12 chances per hour
@@ -271,6 +272,7 @@ class World {
         }
 
         Component.load('data/pack');
+        Player.initSkipTutorial(); // needs varps
 
         const count = ScriptProvider.load('data/pack');
         if (Environment.node.debug) {
@@ -354,6 +356,9 @@ class World {
             // - process pathfinding/following request
             // - client input tracking
             this.processClientsIn();
+
+            // map streaming
+            this.processMapStreaming();
 
             // Spawn triggers, despawn triggers
             this.processNpcEventQueue();
@@ -652,8 +657,18 @@ class World {
                 request.unlink();
                 const state = ScriptRunner.init(request.script, npc);
                 npc.executeScript(state);
+                if (request.type === NpcEventType.SPAWN) {
+                    npc.snapshotSpawnState(); // vars after ai_spawn
+                }
             }
         }
+    }
+
+    private processMapStreaming(): void {
+        if (!this.gameMap.streaming) {
+            return;
+        }
+        this.gameMap.streamTick(this.playerLoop.all());
     }
 
     // - resume suspended script
@@ -1297,10 +1312,63 @@ class World {
         const script = ScriptProvider.getByTrigger(ServerTriggerType.AI_SPAWN, type.id, type.category);
         if (script) {
             this.npcEventQueue.addTail(new NpcEventRequest(NpcEventType.SPAWN, script, npc));
+        } else {
+            npc.snapshotSpawnState(); // no ai_spawn script
         }
 
         if (duration > -1) {
             npc.setLifeCycle(duration);
+        }
+    }
+
+    // remove npcs for good, no respawn (streamed-out squares)
+    destroyNpcs(doomed: Npc[]): void {
+        if (doomed.length === 0) {
+            return;
+        }
+        const set: Set<Npc> = new Set(doomed);
+        for (const npc of doomed) {
+            if (npc.isActive) {
+                this.gameMap.getZone(npc.x, npc.z, npc.level).leave(npc);
+                npc.isActive = false;
+
+                switch (npc.blockWalk) {
+                    case BlockWalk.NPC:
+                        changeNpcCollision(npc.width, npc.x, npc.z, npc.level, false);
+                        break;
+                    case BlockWalk.ALL:
+                        changeNpcCollision(npc.width, npc.x, npc.z, npc.level, false);
+                        changeBlockCollision(npc.width, npc.x, npc.z, npc.level, false);
+                        break;
+                }
+            }
+        }
+
+        // queued triggers
+        for (const request of this.npcEventQueue.all()) {
+            if (set.has(request.npc)) {
+                request.unlink();
+            }
+        }
+
+        // clear interactions targeting them
+        for (const player of this.playerLoop.all()) {
+            if (player.target !== null && set.has(player.target as Npc)) {
+                player.clearInteraction();
+            }
+        }
+        for (const other of this.npcs) {
+            if (other.target !== other && other.target !== null && set.has(other.target as Npc)) {
+                other.clearInteraction();
+            }
+        }
+
+        for (const npc of doomed) {
+            if (npc.nid !== -1) {
+                rsbuf.removeNpc(npc.nid);
+                this.npcs.remove(npc.nid);
+            }
+            npc.cleanup();
         }
     }
 
@@ -1926,6 +1994,9 @@ class World {
                     client.close();
                     return;
                 }
+
+                // streamed maps: load the login square
+                this.gameMap.ensureResident(player.x, player.z);
 
                 if (!Environment.node.members && !this.gameMap.isFreeToPlay(player.x, player.z)) {
                     // in a p2p zone when logging into f2p

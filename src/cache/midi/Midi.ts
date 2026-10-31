@@ -260,6 +260,7 @@ function unwrapRiffMidi(data: Uint8Array): Uint8Array | null {
 export default class Midi {
     static lengths: number[] = [];
 
+    // -1 = not measured yet, 0 = missing or unparseable
     static load(): void {
         const count = OnDemand.cache.count(3);
         if (!count) {
@@ -267,31 +268,35 @@ export default class Midi {
             return;
         }
 
-        // const start = Date.now();
-        this.lengths = new Array(count).fill(0);
+        // measured on first use
+        this.lengths = new Array(count).fill(-1);
+    }
 
-        for (let i = 0; i < count; i++) {
-            const data = OnDemand.cache.read(3, i, true);
-            if (!data) {
-                printWarning(`Missing midi id=${i}`);
-                continue;
-            }
-
-            const length = parseMidiLength(data);
-            if (!length) {
-                printWarning(`Failed to parse midi id=${i}`);
-                continue;
-            }
-
-            this.lengths[i] = length;
+    private static measure(id: number): number {
+        const data = OnDemand.cache.read(3, id, true);
+        if (!data) {
+            printWarning(`Missing midi id=${id}`);
+            return 0;
         }
 
-        // const elapsed = Date.now() - start;
-        // printInfo(`Loaded ${count} midi lengths in ${elapsed}ms.`);
+        const length = parseMidiLength(data);
+        if (!length) {
+            printWarning(`Failed to parse midi id=${id}`);
+            return 0;
+        }
+
+        return length;
     }
 
     static getLength(id: number): number {
-        return this.lengths[id] ?? 0;
+        const known = this.lengths[id];
+        if (known === undefined) {
+            return 0;
+        }
+        if (known >= 0) {
+            return known;
+        }
+        return (this.lengths[id] = this.measure(id));
     }
 
     static getTickLength(id: number): number {

@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 import AnimBase from '#/cache/graphics/AnimBase.js';
 import OnDemand from '#/engine/OnDemand.js';
 import Packet from '#/io/Packet.js';
@@ -27,6 +29,117 @@ export default class AnimFrame {
                 AnimFrame.unpack(data);
             }
         }
+    }
+
+    // frame delays by frame id
+    static delays: Int32Array = new Int32Array(0);
+
+    static loadDelays() {
+        const count = OnDemand.cache.count(2);
+        if (!count) {
+            printFatalError('Cache not packed');
+        }
+
+        const key = OnDemand.cache.indexChecksum(2);
+        if (AnimFrame.readCachedDelays(key)) {
+            return;
+        }
+
+        const delays: number[] = [];
+        for (let i = 0; i < count; i++) {
+            const data = OnDemand.cache.read(2, i, true);
+            if (data) {
+                AnimFrame.scanDelays(data, delays);
+            }
+        }
+
+        AnimFrame.delays = new Int32Array(delays.length);
+        for (let i = 0; i < delays.length; i++) {
+            AnimFrame.delays[i] = delays[i] ?? 0;
+        }
+
+        AnimFrame.writeCachedDelays(key);
+    }
+
+    private static readonly DELAY_CACHE = 'data/cache/anim-delays.dat';
+    private static readonly DELAY_CACHE_MAGIC = 0x41444c31; // 'ADL1'
+
+    private static readCachedDelays(key: number): boolean {
+        try {
+            const raw = fs.readFileSync(AnimFrame.DELAY_CACHE);
+            if (!raw || raw.length < 12) {
+                return false;
+            }
+
+            const buf = new Packet(new Uint8Array(raw));
+            if (buf.g4() !== AnimFrame.DELAY_CACHE_MAGIC || (buf.g4() >>> 0) !== key) {
+                return false; // stale
+            }
+
+            const count = buf.g4();
+            if (count < 0 || count > raw.length - 12) {
+                return false;
+            }
+
+            const delays = new Int32Array(count);
+            for (let i = 0; i < count; i++) {
+                delays[i] = buf.g1();
+            }
+
+            AnimFrame.delays = delays;
+            return true;
+        } catch (_e) {
+            return false;
+        }
+    }
+
+    private static writeCachedDelays(key: number) {
+        try {
+            const count = AnimFrame.delays.length;
+            const buf = new Packet(new Uint8Array(12 + count));
+            buf.p4(AnimFrame.DELAY_CACHE_MAGIC);
+            buf.p4(key | 0);
+            buf.p4(count);
+            for (let i = 0; i < count; i++) {
+                buf.p1(AnimFrame.delays[i] & 0xff);
+            }
+
+            try {
+                fs.mkdirSync('data/cache');
+            } catch (_e) {
+                // already exists
+            }
+            fs.writeFileSync(AnimFrame.DELAY_CACHE, buf.data);
+        } catch (_e) {
+            // read-only data dir
+        }
+    }
+
+    // read frame ids and delays only, skipping the transform streams
+    private static scanDelays(src: Uint8Array, out: number[]) {
+        const meta = new Packet(src);
+        meta.pos = src.length - 8;
+
+        let offset = 0;
+        const head = new Packet(src);
+        head.pos = offset;
+        offset += meta.g2() + 2;
+        offset += meta.g2();
+        offset += meta.g2();
+
+        const del = new Packet(src);
+        del.pos = offset;
+
+        const total = head.g2();
+        for (let i = 0; i < total; i++) {
+            const id = head.g2();
+            out[id] = del.g1();
+            head.g1(); // group count
+        }
+    }
+
+    static getDelay(id: number): number {
+        return AnimFrame.delays[id] ?? 0;
     }
 
     static unpack(src: Uint8Array) {
