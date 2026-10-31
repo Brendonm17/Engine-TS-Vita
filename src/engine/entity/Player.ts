@@ -14,7 +14,7 @@ import ParamType from '#/cache/config/ParamType.js';
 import ScriptVarType from '#/cache/config/ScriptVarType.js';
 import SeqType from '#/cache/config/SeqType.js';
 import VarPlayerType from '#/cache/config/VarPlayerType.js';
-import { PRELOADED, PRELOADED_CRC } from '#/cache/PreloadedPacks.js';
+import { getPreloaded, PRELOADED_CRC, PRELOADED_LEN } from '#/cache/PreloadedPacks.js';
 import { CoordGrid } from '#/engine/CoordGrid.js';
 import { BlockWalk } from '#/engine/entity/BlockWalk.js';
 import BuildArea from '#/engine/entity/BuildArea.js';
@@ -1726,6 +1726,26 @@ export default class Player extends PathingEntity {
             if (varp.transmit) {
                 this.writeVarp(id, value);
             }
+
+            if (varp.id === Player.skipTutorialVarp && value === Player.SKIP_TUTORIAL_AFTER) {
+                this.spSkipTutorial();
+            }
+        }
+    }
+
+    // SP_SKIP_TUTORIAL: queue tutorial_complete once the character is designed
+    private static readonly SKIP_TUTORIAL_AFTER: number = 1; // ^newbie_basics_instructor_designed_character
+    private static skipTutorialVarp: number = -2; // -2 = not looked up yet, -1 = off
+
+    static initSkipTutorial(): void {
+        const env = typeof process !== 'undefined' && process.env ? process.env : {};
+        Player.skipTutorialVarp = env.SP_SKIP_TUTORIAL === 'true' ? VarPlayerType.getId('tutorial') : -1;
+    }
+
+    private spSkipTutorial(): void {
+        const script: ScriptFile | undefined = ScriptProvider.getByName('[label,tutorial_complete]');
+        if (script) {
+            this.enqueueScript(script, PlayerQueueType.ENGINE);
         }
     }
 
@@ -1905,10 +1925,9 @@ export default class Player extends PathingEntity {
             return;
         }
 
-        const song = PRELOADED.get(name + '.mid');
         const crc = PRELOADED_CRC.get(name + '.mid');
-        if (song && crc) {
-            const length = song.length;
+        const length = PRELOADED_LEN.get(name + '.mid');
+        if (crc && length) {
             this.write(new MidiSong(name, crc, length));
         }
     }
@@ -1919,7 +1938,7 @@ export default class Player extends PathingEntity {
             return;
         }
 
-        const jingle = PRELOADED.get(name + '.mid');
+        const jingle = getPreloaded(name + '.mid');
         if (jingle) {
             this.write(new MidiJingle(delay, jingle));
         }

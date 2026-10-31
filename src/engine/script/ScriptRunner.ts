@@ -123,6 +123,8 @@ export default class ScriptRunner {
             return ScriptState.ABORTED;
         }
 
+        state.script.ensureDecoded();
+
         try {
             if (state.execution !== ScriptState.RUNNING) {
                 state.executionHistory.push(state.execution);

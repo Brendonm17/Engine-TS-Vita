@@ -54,6 +54,11 @@ export default class ScriptFile {
     intOperands: number[] = [];
     stringOperands: string[] = [];
 
+    // encoded body, decoded on first run by ensureDecoded()
+    private raw: Packet | null = null;
+    private bodyPos = 0;
+    private trailerPos = 0;
+
     // decodes the same binary format as clientscript2
     static decode(id: number, stream: Packet): ScriptFile {
         const length: number = stream.data.length;
@@ -70,15 +75,40 @@ export default class ScriptFile {
             throw new Error('Invalid script file (bad trailer pos)');
         }
 
-        stream.pos = trailerPos;
-
         const script = new ScriptFile(id);
+
+        stream.pos = trailerPos;
         const _instructions = stream.g4s(); // we don't need to preallocate anything in JS, but still need to read it
         script.intLocalCount = stream.g2();
         script.stringLocalCount = stream.g2();
         script.intArgCount = stream.g2();
         script.stringArgCount = stream.g2();
 
+        stream.pos = 0;
+        script.info.scriptName = stream.gjstr(0);
+        script.info.sourceFilePath = stream.gjstr(0);
+        script.info.lookupKey = stream.g4s();
+        const parameterTypeCount = stream.g1();
+        for (let i = 0; i < parameterTypeCount; i++) {
+            script.info.parameterTypes.push(stream.g1());
+        }
+
+        script.raw = stream;
+        script.bodyPos = stream.pos;
+        script.trailerPos = trailerPos;
+        return script;
+    }
+
+    // decode the instructions and tables if not done yet
+    ensureDecoded(): void {
+        const stream = this.raw;
+        if (!stream) {
+            return;
+        }
+        this.raw = null;
+        const trailerPos = this.trailerPos;
+
+        stream.pos = trailerPos + 12;
         const switches = stream.g1();
         for (let i = 0; i < switches; i++) {
             const count = stream.g2();
@@ -90,22 +120,14 @@ export default class ScriptFile {
                 table[key] = offset;
             }
 
-            script.switchTables[i] = table;
+            this.switchTables[i] = table;
         }
 
-        stream.pos = 0;
-        script.info.scriptName = stream.gjstr(0);
-        script.info.sourceFilePath = stream.gjstr(0);
-        script.info.lookupKey = stream.g4s();
-        const parameterTypeCount = stream.g1();
-        for (let i = 0; i < parameterTypeCount; i++) {
-            script.info.parameterTypes.push(stream.g1());
-        }
-
+        stream.pos = this.bodyPos;
         const lineNumberTableLength = stream.g2();
         for (let i = 0; i < lineNumberTableLength; i++) {
-            script.info.pcs.push(stream.g4s());
-            script.info.lines.push(stream.g4s());
+            this.info.pcs.push(stream.g4s());
+            this.info.lines.push(stream.g4s());
         }
 
         let instr = 0;
@@ -113,17 +135,15 @@ export default class ScriptFile {
             const opcode = stream.g2();
 
             if (opcode === ScriptOpcode.PUSH_CONSTANT_STRING) {
-                script.stringOperands[instr] = stream.gjstr(0);
+                this.stringOperands[instr] = stream.gjstr(0);
             } else if (isLargeOperand(opcode)) {
-                script.intOperands[instr] = stream.g4s();
+                this.intOperands[instr] = stream.g4s();
             } else {
-                script.intOperands[instr] = stream.g1();
+                this.intOperands[instr] = stream.g1();
             }
 
-            script.opcodes[instr++] = opcode;
+            this.opcodes[instr++] = opcode;
         }
-
-        return script;
     }
 
     constructor(id: number) {
@@ -139,6 +159,7 @@ export default class ScriptFile {
     }
 
     lineNumber(pc: number) {
+        this.ensureDecoded();
         for (let i = 0; i < this.info.pcs.length; i++) {
             if (this.info.pcs[i] > pc) {
                 return this.info.lines[i - 1];

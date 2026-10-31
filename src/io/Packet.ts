@@ -265,12 +265,24 @@ export default class Packet extends DoublyLinkable {
     }
 
     gjstr(terminator: number = 10): string {
-        const view: DataView = this.view;
-        const length: number = view.byteLength;
+        // find the terminator, then build the string in chunks
+        const data: Uint8Array = this.data;
+        const start: number = this.pos;
+        let end: number = data.indexOf(terminator, start);
+        if (end === -1) {
+            end = data.length;
+        }
+        this.pos = end < data.length ? end + 1 : end;
+        const len: number = end - start;
+        if (len <= 0) {
+            return '';
+        }
+        if (len <= 4096) {
+            return String.fromCharCode.apply(null, data.subarray(start, end) as unknown as number[]);
+        }
         let str: string = '';
-        let b: number;
-        while ((b = view.getUint8(this.pos++)) !== terminator && this.pos < length) {
-            str += String.fromCharCode(b);
+        for (let i: number = start; i < end; i += 4096) {
+            str += String.fromCharCode.apply(null, data.subarray(i, Math.min(end, i + 4096)) as unknown as number[]);
         }
         return str;
     }

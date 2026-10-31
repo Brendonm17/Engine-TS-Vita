@@ -3,6 +3,7 @@ import fs from 'fs';
 import kleur from 'kleur';
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import { ParamHelper, ParamMap } from '#/cache/config/ParamHelper.js';
 import ParamType from '#/cache/config/ParamType.js';
 import Jagfile from '#/io/Jagfile.js';
@@ -14,6 +15,8 @@ import { printFatalError } from '#/util/Logger.js';
 export default class ObjType extends ConfigType {
     static configNames: Map<string, number> = new Map();
     static configs: ObjType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/obj.dat`)) {
@@ -22,7 +25,30 @@ export default class ObjType extends ConfigType {
 
         const server = Packet.load(`${dir}/server/obj.dat`);
         const jag = Jagfile.load(`${dir}/client/config`);
-        this.parse(server, jag);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/obj.idx`, server, jag, 'obj.dat', 'obj.idx');
+        if (index) {
+            ObjType.index = index;
+            ObjType.configNames = index.server.names();
+            ObjType.configs = new Array(ObjType.count_(index));
+        } else {
+            ObjType.index = null;
+            this.parse(server, jag);
+        }
+    }
+
+    private static count_(index: ConfigPair): number {
+        return index.server.count;
+    }
+
+    static decodeOne(id: number): ObjType {
+        const index: ConfigPair = ObjType.index!;
+        const config = new ObjType(id);
+        config.decodeType(index.server.entry(id));
+        if (index.client) {
+            config.decodeType(index.client.entry(id));
+        }
+        ObjType.postOne(config);
+        return config;
     }
 
     static parse(server: Packet, jag: Jagfile) {
@@ -47,36 +73,44 @@ export default class ObjType extends ConfigType {
         }
 
         for (let id = 0; id < count; id++) {
-            const config = ObjType.configs[id];
+            ObjType.postOne(ObjType.configs[id]);
+        }
+    }
 
-            if (config.certtemplate != -1) {
-                config.toCertificate();
-            }
+    // fix-ups that depend on other configs
+    static postOne(config: ObjType): void {
+        if (config.certtemplate != -1) {
+            config.toCertificate();
+        }
 
-            if (config.dummyitem !== 0) {
-                config.tradeable = false;
-            }
+        if (config.dummyitem !== 0) {
+            config.tradeable = false;
+        }
 
-            if (!Environment.NODE_MEMBERS && config.members) {
-                config.tradeable = false;
-                config.op = [null, null, 'Take', null, null];
-                config.iop = [null, null, null, null, 'Drop'];
+        if (!Environment.NODE_MEMBERS && config.members) {
+            config.tradeable = false;
+            config.op = [null, null, 'Take', null, null];
+            config.iop = [null, null, null, null, 'Drop'];
 
-                // "Yeah, turns out some of the devs didn't realise that their 'category' triggers would be auto-ignored on F2P."
-                // be warned this means category-triggered opheld5 (drop) scripts are skipped on f2p...
-                config.category = -1;
+            // "Yeah, turns out some of the devs didn't realise that their 'category' triggers would be auto-ignored on F2P."
+            // be warned this means category-triggered opheld5 (drop) scripts are skipped on f2p...
+            config.category = -1;
 
-                config.params.forEach((_, key): void => {
-                    if (ParamType.get(key)?.autodisable) {
-                        config.params.delete(key);
-                    }
-                });
-            }
+            config.params.forEach((_, key): void => {
+                if (ParamType.get(key)?.autodisable) {
+                    config.params.delete(key);
+                }
+            });
         }
     }
 
     static get(id: number): ObjType {
-        return ObjType.configs[id];
+        let config: ObjType | undefined = ObjType.configs[id];
+        if (config === undefined && ObjType.index !== null && id >= 0 && id < ObjType.index.server.count) {
+            config = ObjType.decodeOne(id);
+            ObjType.configs[id] = config;
+        }
+        return config as ObjType;
     }
 
     static getId(name: string): number {

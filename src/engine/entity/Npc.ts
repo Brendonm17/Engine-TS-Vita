@@ -53,6 +53,14 @@ export default class Npc extends PathingEntity {
     // runtime variables
     readonly vars: Int32Array;
     readonly varsString: (string | undefined)[];
+    // vars as ai_spawn left them, null until it runs
+    private spawnVars: Int32Array | null = null;
+    private spawnVarsString: (string | undefined)[] | null = null;
+    // index in its square's npc file, -1 if script-spawned
+    spawnIndex: number = -1;
+    // hibernated vars, applied after ai_spawn runs
+    private pendingVars: Int32Array | null = null;
+    private pendingVarsString: (string | undefined)[] | null = null;
 
     // script variables
     activeScript: ScriptState | null = null;
@@ -274,6 +282,75 @@ export default class Npc extends PathingEntity {
         if (hunted.length > 0) {
             this.huntTarget = hunted[Math.floor(Math.random() * hunted.length)];
         }
+    }
+
+    // record vars as the spawn trigger left them
+    snapshotSpawnState(): void {
+        this.spawnVars = Int32Array.from(this.vars);
+        this.spawnVarsString = this.varsString.slice();
+        this.applyPendingVars();
+    }
+
+    // restore vars from a hibernated square
+    restoreVars(vars: Int32Array, varsString: (string | undefined)[]): void {
+        this.pendingVars = vars;
+        this.pendingVarsString = varsString;
+        if (this.spawnVars !== null) {
+            this.applyPendingVars();
+        }
+    }
+
+    private applyPendingVars(): void {
+        if (this.pendingVars === null || this.pendingVarsString === null) {
+            return;
+        }
+        this.vars.set(this.pendingVars.subarray(0, Math.min(this.vars.length, this.pendingVars.length)));
+        for (let index: number = 0; index < this.varsString.length; index++) {
+            this.varsString[index] = this.pendingVarsString[index];
+        }
+        this.pendingVars = null;
+        this.pendingVarsString = null;
+    }
+
+    // alive, base type, defaults, no target/script/queue/delay, unhurt
+    isIdle(): boolean {
+        if (!this.isActive || this.lifecycle !== EntityLifeCycle.RESPAWN || this.type !== this.baseType) {
+            return false;
+        }
+        if (this.target !== null || this.huntTarget !== null || this.activeScript !== null || this.delayed || this.queue.head() !== null) {
+            return false;
+        }
+        const type: NpcType = NpcType.get(this.type);
+        if (this.targetOp !== type.defaultmode || this.huntMode !== type.huntmode || this.huntrange !== type.huntrange || this.timerInterval !== type.timer) {
+            return false;
+        }
+        for (let index: number = 0; index < this.levels.length; index++) {
+            if (this.levels[index] !== this.baseLevels[index]) {
+                return false;
+            }
+        }
+        for (const hero of this.heroPoints) {
+            if (hero && hero.hash64 !== -1n) {
+                return false; // has damage credit
+            }
+        }
+        return true;
+    }
+
+    // idle with vars unchanged since spawn
+    isPristine(): boolean {
+        if (!this.isIdle()) {
+            return false;
+        }
+        if (this.spawnVars !== null && this.spawnVarsString !== null) {
+            for (let index: number = 0; index < this.vars.length; index++) {
+                if (this.vars[index] !== this.spawnVars[index] || this.varsString[index] !== this.spawnVarsString[index]) {
+                    return false;
+                }
+            }
+        }
+        // spawn trigger has not run yet
+        return true;
     }
 
     // Very awkward function - needs to be reworked

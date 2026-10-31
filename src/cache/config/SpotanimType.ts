@@ -2,12 +2,15 @@ import fs from 'fs';
 
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
 
 export default class SpotanimType extends ConfigType {
     private static configNames = new Map();
     private static configs: SpotanimType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/spotanim.dat`)) {
@@ -16,7 +19,29 @@ export default class SpotanimType extends ConfigType {
 
         const server = Packet.load(`${dir}/server/spotanim.dat`);
         const jag = Jagfile.load(`${dir}/client/config`);
-        this.parse(server, jag);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/spotanim.idx`, server, jag, 'spotanim.dat', 'spotanim.idx');
+        if (index) {
+            SpotanimType.index = index;
+            SpotanimType.configNames = index.server.names();
+            SpotanimType.configs = new Array(SpotanimType.count_(index));
+        } else {
+            SpotanimType.index = null;
+            this.parse(server, jag);
+        }
+    }
+
+    private static count_(index: ConfigPair): number {
+        return index.server.count;
+    }
+
+    static decodeOne(id: number): SpotanimType {
+        const index: ConfigPair = SpotanimType.index!;
+        const config = new SpotanimType(id);
+        config.decodeType(index.server.entry(id));
+        if (index.client) {
+            config.decodeType(index.client.entry(id));
+        }
+        return config;
     }
 
     static parse(server: Packet, jag: Jagfile) {
@@ -42,7 +67,12 @@ export default class SpotanimType extends ConfigType {
     }
 
     static get(id: number): SpotanimType {
-        return SpotanimType.configs[id];
+        let config: SpotanimType | undefined = SpotanimType.configs[id];
+        if (config === undefined && SpotanimType.index !== null && id >= 0 && id < SpotanimType.index.server.count) {
+            config = SpotanimType.decodeOne(id);
+            SpotanimType.configs[id] = config;
+        }
+        return config as SpotanimType;
     }
 
     static getId(name: string): number {

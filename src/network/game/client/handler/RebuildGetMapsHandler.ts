@@ -1,4 +1,4 @@
-import { PRELOADED } from '#/cache/PreloadedPacks.js';
+import { getPreloaded } from '#/cache/PreloadedPacks.js';
 import Player from '#/engine/entity/Player.js';
 import World from '#/engine/World.js';
 import ClientGameMessageHandler from '#/network/game/client/ClientGameMessageHandler.js';
@@ -41,7 +41,7 @@ export default class RebuildGetMapsHandler extends ClientGameMessageHandler<Rebu
             const z: number = mapsquare & 0xff;
 
             if (type === 0) {
-                const land: Uint8Array | undefined = PRELOADED.get(`m${x}_${z}`);
+                const land: Uint8Array | undefined = getPreloaded(`m${x}_${z}`);
                 if (!land) {
                     continue;
                 }
@@ -51,7 +51,7 @@ export default class RebuildGetMapsHandler extends ClientGameMessageHandler<Rebu
                 }
                 player.write(new DataLandDone(x, z));
             } else if (type === 1) {
-                const loc: Uint8Array | undefined = PRELOADED.get(`l${x}_${z}`);
+                const loc: Uint8Array | undefined = getPreloaded(`l${x}_${z}`);
                 if (!loc) {
                     continue;
                 }

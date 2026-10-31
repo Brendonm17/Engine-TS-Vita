@@ -2,12 +2,15 @@ import fs from 'fs';
 
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import ScriptVarType from '#/cache/config/ScriptVarType.js';
 import Packet from '#/io/Packet.js';
 
 export default class ParamType extends ConfigType {
     private static configNames = new Map<string, number>();
     private static configs: ParamType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/param.dat`)) {
@@ -15,7 +18,21 @@ export default class ParamType extends ConfigType {
         }
 
         const dat = Packet.load(`${dir}/server/param.dat`);
-        this.parse(dat);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/param.idx`, dat, null, null, null);
+        if (index) {
+            ParamType.index = index;
+            ParamType.configNames = index.server.names();
+            ParamType.configs = new Array(index.server.count);
+        } else {
+            ParamType.index = null;
+            this.parse(dat);
+        }
+    }
+
+    static decodeOne(id: number): ParamType {
+        const config = new ParamType(id);
+        config.decodeType(ParamType.index!.server.entry(id));
+        return config;
     }
 
     static parse(dat: Packet) {
@@ -37,7 +54,12 @@ export default class ParamType extends ConfigType {
     }
 
     static get(id: number): ParamType {
-        return ParamType.configs[id];
+        let config: ParamType | undefined = ParamType.configs[id];
+        if (config === undefined && ParamType.index !== null && id >= 0 && id < ParamType.index.server.count) {
+            config = ParamType.decodeOne(id);
+            ParamType.configs[id] = config;
+        }
+        return config as ParamType;
     }
 
     static getId(name: string): number {

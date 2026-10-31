@@ -24,6 +24,16 @@ export default class Component {
     private static componentNames: Map<string, number> = new Map();
     private static components: Component[] = [];
 
+    // lazy decode, offsets cached in interface.cidx
+    private static dataOffsets: Int32Array = new Int32Array(0); // -1 = no component
+    private static rootLayers: Int32Array = new Int32Array(0);
+    private static extraOffsets: Int32Array = new Int32Array(0); // offset in interface.dat, -1 = none
+    private static lazyData: Packet | null = null;
+    private static lazyExtra: Packet | null = null;
+
+    private static readonly INDEX_MAGIC: number = 0x43494458; // 'CIDX'
+    private static readonly INDEX_VERSION: number = 1;
+
     static load(dir: string): void {
         if (!fs.existsSync(`${dir}/client/interface`)) {
             return;
@@ -34,26 +44,121 @@ export default class Component {
             return;
         }
 
-        this.decode(client.read('data')!);
+        const data: Packet = client.read('data')!;
+        const server: Packet = Packet.load(`${dir}/server/interface.dat`);
+        const indexPath: string = `${dir}/server/interface.cidx`;
+        if (Component.loadIndex(indexPath, data, server)) {
+            return;
+        }
 
-        const server = Packet.load(`${dir}/server/interface.dat`);
+        this.decode(data);
         this.decodeExtra(server);
+        Component.saveIndex(indexPath, data, server);
+    }
+
+    private static loadIndex(path: string, data: Packet, server: Packet): boolean {
+        let index: Packet;
+        try {
+            if (!fs.existsSync(path)) {
+                return false;
+            }
+            index = Packet.load(path);
+        } catch (_) {
+            return false;
+        }
+        if (index.length < 17 || index.g4() !== Component.INDEX_MAGIC || index.g1() !== Component.INDEX_VERSION) {
+            return false;
+        }
+        const count: number = index.g4();
+        if (index.g4() !== data.length || index.g4() !== server.length || index.available !== count * 12) {
+            return false;
+        }
+        const dataOffsets: Int32Array = new Int32Array(count);
+        const rootLayers: Int32Array = new Int32Array(count);
+        const extraOffsets: Int32Array = new Int32Array(count);
+        for (let id: number = 0; id < count; id++) {
+            dataOffsets[id] = index.g4s();
+            rootLayers[id] = index.g4s();
+            extraOffsets[id] = index.g4s();
+        }
+        Component.componentNames = new Map();
+        Component.components = new Array(count);
+        Component.dataOffsets = dataOffsets;
+        Component.rootLayers = rootLayers;
+        Component.extraOffsets = extraOffsets;
+        Component.lazyData = data;
+        Component.lazyExtra = server;
+        return true;
+    }
+
+    private static saveIndex(path: string, data: Packet, server: Packet): void {
+        const count: number = Component.dataOffsets.length;
+        const out: Packet = new Packet(new Uint8Array(17 + count * 12));
+        out.p4(Component.INDEX_MAGIC);
+        out.p1(Component.INDEX_VERSION);
+        out.p4(count);
+        out.p4(data.length);
+        out.p4(server.length);
+        for (let id: number = 0; id < count; id++) {
+            out.p4(Component.dataOffsets[id]);
+            out.p4(Component.rootLayers[id]);
+            out.p4(id < Component.extraOffsets.length ? Component.extraOffsets[id] : -1);
+        }
+        try {
+            fs.writeFileSync(path, out.data);
+        } catch (_) {
+            // read-only data dir
+        }
+    }
+
+    private static recordOffset(table: Int32Array, id: number, value: number): Int32Array {
+        if (id >= table.length) {
+            const grown: Int32Array = new Int32Array(Math.max(id + 1, table.length * 2, 1024)).fill(-1);
+            grown.set(table);
+            table = grown;
+        }
+        table[id] = value;
+        return table;
     }
 
     static decode(dat: Packet) {
         this.componentNames = new Map();
         this.components = [];
+        this.dataOffsets = new Int32Array(0);
+        this.rootLayers = new Int32Array(0);
+        this.extraOffsets = new Int32Array(0);
+        this.lazyData = null;
+        this.lazyExtra = null;
 
         dat.g2(); // count
 
         let rootLayer = -1;
         while (dat.available > 0) {
+            let offset = dat.pos;
             let id = dat.g2();
             if (id === 65535) {
                 rootLayer = dat.g2();
+                offset = dat.pos;
                 id = dat.g2();
             }
+            Component.dataOffsets = Component.recordOffset(Component.dataOffsets, id, offset);
+            Component.rootLayers = Component.recordOffset(Component.rootLayers, id, rootLayer);
 
+            Component.components[id] = Component.decodeOne(dat, id, rootLayer);
+        }
+        // trim to max id + 1
+        let count: number = Component.dataOffsets.length;
+        while (count > 0 && Component.dataOffsets[count - 1] < 0) {
+            count--;
+        }
+        Component.dataOffsets = Component.dataOffsets.slice(0, count);
+        Component.rootLayers = Component.rootLayers.slice(0, count);
+        Component.extraOffsets = new Int32Array(count).fill(-1);
+    }
+
+    // decode one component, positioned after its id
+    static decodeOne(dat: Packet, id: number, rootLayer: number): Component {
+        {
             const com = new Component();
             com.id = id;
             com.rootLayer = rootLayer;
@@ -229,7 +334,7 @@ export default class Component {
                     break;
             }
 
-            Component.components[id] = com;
+            return com;
         }
     }
 
@@ -238,22 +343,51 @@ export default class Component {
         dat.g2(); // count
 
         while (dat.available > 0) {
+            const offset = dat.pos;
             const id = dat.g2();
             const debugname = dat.gjstr();
             const overlay = dat.gbool();
 
             Component.components[id].comName = debugname;
             Component.components[id].overlay = overlay;
+            Component.extraOffsets = Component.recordOffset(Component.extraOffsets, id, offset);
 
             Component.componentNames.set(debugname, id);
         }
     }
 
     static get(id: number): Component {
-        return Component.components[id];
+        let com: Component | undefined = Component.components[id];
+        if (com === undefined && Component.lazyData !== null && id >= 0 && id < Component.dataOffsets.length && Component.dataOffsets[id] >= 0) {
+            const dat: Packet = Component.lazyData;
+            dat.pos = Component.dataOffsets[id];
+            dat.g2(); // id
+            com = Component.decodeOne(dat, id, Component.rootLayers[id]);
+            const extra: number = Component.extraOffsets[id];
+            if (extra >= 0 && Component.lazyExtra !== null) {
+                const server: Packet = Component.lazyExtra;
+                server.pos = extra;
+                server.g2(); // id
+                com.comName = server.gjstr();
+                com.overlay = server.gbool();
+            }
+            Component.components[id] = com;
+        }
+        return com as Component;
     }
 
     static getId(name: string): number {
+        if (Component.componentNames.size === 0 && Component.lazyExtra !== null) {
+            // scan names on first use
+            const server: Packet = Component.lazyExtra;
+            server.pos = 2;
+            while (server.available > 0) {
+                const id = server.g2();
+                const debugname = server.gjstr();
+                server.gbool();
+                Component.componentNames.set(debugname, id);
+            }
+        }
         return Component.componentNames.get(name) ?? -1;
     }
 

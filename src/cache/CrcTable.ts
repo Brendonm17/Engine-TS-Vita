@@ -11,8 +11,16 @@ function makeCrc(path: string) {
         return;
     }
 
-    const packet = Packet.load(path);
-    const crc = Packet.getcrc(packet.data, 0, packet.data.length);
+    // use the host's native CRC when available
+    const host = (globalThis as any).__host;
+    let crc: number;
+    const native = host && typeof host.fileCrc32 === 'function' ? host.fileCrc32(path) : null;
+    if (native) {
+        crc = native[0];
+    } else {
+        const packet = Packet.load(path);
+        crc = Packet.getcrc(packet.data, 0, packet.data.length);
+    }
     CrcTable.push(crc);
     CrcBuffer.p4(crc);
 }

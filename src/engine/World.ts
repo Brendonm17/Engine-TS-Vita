@@ -121,7 +121,8 @@ class World {
 
     private static readonly INV_STOCKRATE: number = 100; // 1m shop restocks
 
-    private static readonly PLAYER_SAVERATE: number = 1500; // 15m autosave
+    // 15m autosave, SP_SAVE_RATE (ticks) overrides
+    private static readonly PLAYER_SAVERATE: number = Math.max(10, parseInt(process.env.SP_SAVE_RATE ?? '1500', 10) || 1500);
     private static readonly PLAYER_COORDLOGRATE: number = 50; // 30s server check-in
 
     private static readonly AFK_EVENTRATE: number = 500; // 5m: 60/5 = 12 chances per hour
@@ -268,6 +269,7 @@ class World {
         }
 
         Component.load('data/pack');
+        Player.initSkipTutorial();
 
         const count = ScriptProvider.load('data/pack');
         if (Environment.NODE_DEBUG) {
@@ -380,6 +382,9 @@ class World {
 
             // player login, good spot for it (before packets so they immediately load but after processing so nothing hits them)
             this.processLogins();
+
+            // map streaming
+            this.processMapStreaming();
 
             // process zones
             // - build list of active zones around players
@@ -668,8 +673,18 @@ class World {
                 request.unlink();
                 const state = ScriptRunner.init(request.script, npc);
                 npc.executeScript(state);
+                if (request.type === NpcEventType.SPAWN) {
+                    npc.snapshotSpawnState(); // vars after ai_spawn
+                }
             }
         }
+    }
+
+    private processMapStreaming(): void {
+        if (!this.gameMap.streaming) {
+            return;
+        }
+        this.gameMap.streamTick(this.playerLoop.all());
     }
 
     // - resume suspended script
@@ -938,6 +953,8 @@ class World {
             player.tele = true;
             player.moveClickRequest = false;
 
+            // streamed maps: load the login square
+            this.gameMap.ensureResident(player.x, player.z);
             this.gameMap.getZone(player.x, player.z, player.level).enter(player);
             player.onLogin();
 
@@ -1225,6 +1242,20 @@ class World {
         }
     }
 
+    // save every player now, before the host suspends
+    saveAllPlayers(): number {
+        let count: number = 0;
+        for (const player of this.playerLoop.all()) {
+            this.loginThread.postMessage({
+                type: 'player_autosave',
+                username: player.username,
+                save: player.save()
+            });
+            count++;
+        }
+        return count;
+    }
+
     private savePlayers(): void {
         for (const player of this.playerLoop.all()) {
             this.loginThread.postMessage({
@@ -1286,6 +1317,8 @@ class World {
         const script = ScriptProvider.getByTrigger(ServerTriggerType.AI_SPAWN, type.id, type.category);
         if (script) {
             this.npcEventQueue.addTail(new NpcEventRequest(NpcEventType.SPAWN, script, npc));
+        } else {
+            npc.snapshotSpawnState(); // no ai_spawn script
         }
 
         if (duration > -1) {
@@ -1315,6 +1348,57 @@ class World {
             npc.cleanup();
         } else if (npc.lifecycle === EntityLifeCycle.RESPAWN && duration > -1) {
             npc.setLifeCycle(adjustedDuration);
+        }
+    }
+
+    // remove npcs for good, no respawn (streamed-out squares)
+    destroyNpcs(doomed: Npc[]): void {
+        if (doomed.length === 0) {
+            return;
+        }
+        const set: Set<Npc> = new Set(doomed);
+        for (const npc of doomed) {
+            if (npc.isActive) {
+                this.gameMap.getZone(npc.x, npc.z, npc.level).leave(npc);
+                npc.isActive = false;
+
+                switch (npc.blockWalk) {
+                    case BlockWalk.NPC:
+                        changeNpcCollision(npc.width, npc.x, npc.z, npc.level, false);
+                        break;
+                    case BlockWalk.ALL:
+                        changeNpcCollision(npc.width, npc.x, npc.z, npc.level, false);
+                        changePlayerCollision(npc.width, npc.x, npc.z, npc.level, false);
+                        break;
+                }
+            }
+        }
+
+        // queued triggers
+        for (const request of this.npcEventQueue.all()) {
+            if (set.has(request.npc)) {
+                request.unlink();
+            }
+        }
+
+        // clear interactions targeting them
+        for (const player of this.playerLoop.all()) {
+            if (player.target !== null && set.has(player.target as Npc)) {
+                player.clearInteraction();
+            }
+        }
+        for (const other of this.npcs) {
+            if (other.target !== other && other.target !== null && set.has(other.target as Npc)) {
+                other.clearInteraction();
+            }
+        }
+
+        for (const npc of doomed) {
+            if (npc.nid !== -1) {
+                rsbuf.removeNpc(npc.nid);
+                this.npcs.remove(npc.nid);
+            }
+            npc.cleanup();
         }
     }
 
@@ -2118,6 +2202,7 @@ class World {
 
             const rev = World.loginBuf.g1();
             if (rev !== Environment.ENGINE_REVISION) {
+                (globalThis as any).__host?.print('[sp] login reject: revision ' + rev + ' != ' + Environment.ENGINE_REVISION);
                 client.send(Uint8Array.from([6]));
                 client.close();
                 return;
@@ -2129,7 +2214,10 @@ class World {
             const crcs = new Uint8Array(9 * 4);
             World.loginBuf.gdata(crcs, 0, crcs.length);
 
-            if (CrcBuffer32 !== Packet.getcrc(crcs, 0, crcs.length)) {
+            // SP_SKIP_LOGIN_CRC skips the archive CRC check
+            const spSkipCrc = (globalThis as any).process?.env?.SP_SKIP_LOGIN_CRC === 'true';
+            if (!spSkipCrc && CrcBuffer32 !== Packet.getcrc(crcs, 0, crcs.length)) {
+                (globalThis as any).__host?.print('[sp] login reject: archive CRC ' + Packet.getcrc(crcs, 0, crcs.length) + ' != server ' + CrcBuffer32);
                 client.send(Uint8Array.from([6]));
                 client.close();
                 return;
@@ -2137,9 +2225,11 @@ class World {
 
             World.loginBuf.rsadec(priv);
 
-            if (World.loginBuf.g1() !== 10) {
+            const rsaMarker = World.loginBuf.g1();
+            if (rsaMarker !== 10) {
                 // RSA error
                 // sending out of date intentionally
+                (globalThis as any).__host?.print('[sp] login reject: RSA marker ' + rsaMarker + ' != 10 (key mismatch)');
                 client.send(Uint8Array.from([6]));
                 client.close();
                 return;

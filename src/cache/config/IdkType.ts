@@ -2,12 +2,15 @@ import fs from 'fs';
 
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
 
 export default class IdkType extends ConfigType {
     private static configNames: Map<string, number> = new Map();
     private static configs: IdkType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/idk.dat`)) {
@@ -16,7 +19,29 @@ export default class IdkType extends ConfigType {
 
         const server = Packet.load(`${dir}/server/idk.dat`);
         const jag = Jagfile.load(`${dir}/client/config`);
-        this.parse(server, jag);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/idk.idx`, server, jag, 'idk.dat', 'idk.idx');
+        if (index) {
+            IdkType.index = index;
+            IdkType.configNames = index.server.names();
+            IdkType.configs = new Array(IdkType.count_(index));
+        } else {
+            IdkType.index = null;
+            this.parse(server, jag);
+        }
+    }
+
+    private static count_(index: ConfigPair): number {
+        return index.server.count;
+    }
+
+    static decodeOne(id: number): IdkType {
+        const index: ConfigPair = IdkType.index!;
+        const config = new IdkType(id);
+        config.decodeType(index.server.entry(id));
+        if (index.client) {
+            config.decodeType(index.client.entry(id));
+        }
+        return config;
     }
 
     static parse(server: Packet, jag: Jagfile) {
@@ -42,7 +67,12 @@ export default class IdkType extends ConfigType {
     }
 
     static get(id: number): IdkType {
-        return IdkType.configs[id];
+        let config: IdkType | undefined = IdkType.configs[id];
+        if (config === undefined && IdkType.index !== null && id >= 0 && id < IdkType.index.server.count) {
+            config = IdkType.decodeOne(id);
+            IdkType.configs[id] = config;
+        }
+        return config as IdkType;
     }
 
     static getId(name: string): number {

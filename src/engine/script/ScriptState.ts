@@ -129,6 +129,7 @@ export default class ScriptState {
     lastInt: number = 0;
 
     constructor(script: ScriptFile, args: ScriptArgument[] | null = []) {
+        script.ensureDecoded();
         this.script = script;
         this.trigger = script.info.lookupKey & 0xff;
 
@@ -386,6 +387,7 @@ export default class ScriptState {
     }
 
     setupNewScript(script: ScriptFile): void {
+        script.ensureDecoded();
         const intLocals: number[] = new Array(script.intLocalCount).fill(0);
         const intArgCount: number = script.intArgCount;
         for (let index: number = 0; index < intArgCount; index++) {

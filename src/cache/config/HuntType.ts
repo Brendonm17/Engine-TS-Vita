@@ -2,6 +2,7 @@ import fs from 'fs';
 
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import { HuntCheckNotTooStrong } from '#/engine/entity/hunt/HuntCheckNotTooStrong.js';
 import { HuntModeType } from '#/engine/entity/hunt/HuntModeType.js';
 import { HuntNobodyNear } from '#/engine/entity/hunt/HuntNobodyNear.js';
@@ -12,13 +13,30 @@ import Packet from '#/io/Packet.js';
 export default class HuntType extends ConfigType {
     private static configNames: Map<string, number> = new Map();
     private static configs: HuntType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/hunt.dat`)) {
             return;
         }
+
         const dat = Packet.load(`${dir}/server/hunt.dat`);
-        this.parse(dat);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/hunt.idx`, dat, null, null, null);
+        if (index) {
+            HuntType.index = index;
+            HuntType.configNames = index.server.names();
+            HuntType.configs = new Array(index.server.count);
+        } else {
+            HuntType.index = null;
+            this.parse(dat);
+        }
+    }
+
+    static decodeOne(id: number): HuntType {
+        const config = new HuntType(id);
+        config.decodeType(HuntType.index!.server.entry(id));
+        return config;
     }
 
     static parse(dat: Packet) {
@@ -40,7 +58,12 @@ export default class HuntType extends ConfigType {
     }
 
     static get(id: number): HuntType {
-        return HuntType.configs[id];
+        let config: HuntType | undefined = HuntType.configs[id];
+        if (config === undefined && HuntType.index !== null && id >= 0 && id < HuntType.index.server.count) {
+            config = HuntType.decodeOne(id);
+            HuntType.configs[id] = config;
+        }
+        return config as HuntType;
     }
 
     static getId(name: string): number {

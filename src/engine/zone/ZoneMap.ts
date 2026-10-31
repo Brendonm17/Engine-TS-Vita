@@ -41,6 +41,16 @@ export default class ZoneMap {
         return zone;
     }
 
+    // existing zone, never creates one
+    zoneIfExists(x: number, z: number, level: number): Zone | undefined {
+        return this.zones.get(ZoneMap.zoneIndex(x, z, level));
+    }
+
+    // drop a zone when its map square unloads
+    remove(index: number): void {
+        this.zones.delete(index);
+    }
+
     grid(level: number): ZoneGrid {
         let grid: ZoneGrid | undefined = this.grids.get(level);
         if (typeof grid == 'undefined') {

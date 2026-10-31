@@ -3,6 +3,7 @@ import fs from 'fs';
 import kleur from 'kleur';
 
 import { ConfigType } from '#/cache/config/ConfigType.js';
+import { ConfigPair, openConfigIndex } from '#/cache/config/ConfigIndex.js';
 import { ParamHelper, ParamMap } from '#/cache/config/ParamHelper.js';
 import Jagfile from '#/io/Jagfile.js';
 import Packet from '#/io/Packet.js';
@@ -11,6 +12,8 @@ import { printFatalError } from '#/util/Logger.js';
 export default class LocType extends ConfigType {
     static configNames: Map<string, number> = new Map();
     static configs: LocType[] = [];
+    // lazy decode index, null when decoded eagerly
+    static index: ConfigPair | null = null;
 
     static load(dir: string) {
         if (!fs.existsSync(`${dir}/server/loc.dat`)) {
@@ -19,7 +22,30 @@ export default class LocType extends ConfigType {
 
         const server = Packet.load(`${dir}/server/loc.dat`);
         const jag = Jagfile.load(`${dir}/client/config`);
-        this.parse(server, jag);
+        const index: ConfigPair | null = openConfigIndex(`${dir}/server/loc.idx`, server, jag, 'loc.dat', 'loc.idx');
+        if (index) {
+            LocType.index = index;
+            LocType.configNames = index.server.names();
+            LocType.configs = new Array(LocType.count_(index));
+        } else {
+            LocType.index = null;
+            this.parse(server, jag);
+        }
+    }
+
+    private static count_(index: ConfigPair): number {
+        return index.server.count;
+    }
+
+    static decodeOne(id: number): LocType {
+        const index: ConfigPair = LocType.index!;
+        const config = new LocType(id);
+        config.decodeType(index.server.entry(id));
+        if (index.client) {
+            config.decodeType(index.client.entry(id));
+        }
+        config.postDecode();
+        return config;
     }
 
     static parse(server: Packet, jag: Jagfile) {
@@ -46,7 +72,12 @@ export default class LocType extends ConfigType {
     }
 
     static get(id: number): LocType {
-        return LocType.configs[id];
+        let config: LocType | undefined = LocType.configs[id];
+        if (config === undefined && LocType.index !== null && id >= 0 && id < LocType.index.server.count) {
+            config = LocType.decodeOne(id);
+            LocType.configs[id] = config;
+        }
+        return config as LocType;
     }
 
     static getId(name: string): number {
